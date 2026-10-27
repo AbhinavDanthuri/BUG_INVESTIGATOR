@@ -1,0 +1,10 @@
+line-length = 110
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = [
+  "E501",   # long lines: prompts and docstrings read better unwrapped
+  "B008",   # FastAPI Depends() in defaults is the documented pattern
+  "UP042",  # str+Enum is deliberate: SQLAlchemy Enum columns compare on .value
+]
