@@ -104,6 +104,8 @@ class TestOut(BaseModel):
 class ReportOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    is_defect: str
+    verdict_reason: str | None = None
     root_cause: str
     confidence: float
     affected_files: list[str] | None = None

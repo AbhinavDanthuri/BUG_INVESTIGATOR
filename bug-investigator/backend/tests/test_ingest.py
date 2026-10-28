@@ -185,3 +185,19 @@ def test_index_still_builds_when_issue_history_fails(db, settings, sample_repo):
     types = {c.source_type for c in db.query(m.Chunk).filter_by(index_version_id=version.id)}
     assert m.SourceType.code in types
     assert m.SourceType.issue not in types  # history was skipped, cleanly
+
+
+def test_limits_of_zero_skip_issues_and_commits(db, settings, sample_repo):
+    """`--issue-limit 0 --commit-limit 0` keeps a first index small and fast."""
+    from app.ingest.indexer import build_index_version
+
+    repo = m.Repository(owner="acme", name="sample3", clone_url=str(sample_repo), default_branch="main")
+    db.add(repo)
+    db.commit()
+
+    version = build_index_version(db, repo, settings, gh=None, issue_limit=0, commit_limit=0)
+
+    types = {c.source_type for c in db.query(m.Chunk).filter_by(index_version_id=version.id)}
+    assert m.SourceType.commit not in types
+    assert m.SourceType.issue not in types
+    assert types == {m.SourceType.code, m.SourceType.doc}

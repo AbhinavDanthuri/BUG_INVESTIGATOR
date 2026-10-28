@@ -17,9 +17,10 @@ class Settings(BaseSettings):
     database_url: str = "mysql+pymysql://bugi:bugi@localhost:3306/bug_investigator"
     github_token: str = ""
 
-    llm_provider: str = "gemini"  # gemini | anthropic | openai | ollama
+    llm_provider: str = "gemini"  # gemini | groq | anthropic | openai | ollama
     llm_model: str = "gemini-2.5-flash"  # check AI Studio for the current Flash model name
     google_api_key: str = ""
+    groq_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     max_iterations: int = 3
     token_budget: int = 200_000
     retrieval_top_k: int = 8
-    prompt_version: str = "v1"
+    prompt_version: str = "v2"  # v2 added the is_defect verdict; runs are not comparable across versions
 
 
 @lru_cache

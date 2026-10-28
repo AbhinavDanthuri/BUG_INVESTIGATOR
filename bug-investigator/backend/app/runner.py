@@ -89,6 +89,8 @@ def _persist_report(db: Session, inv: m.Investigation, repo: m.Repository, issue
     md = render_markdown(issue_payload(issue), report, f"{repo.owner}/{repo.name}")
     row = m.Report(
         investigation_id=inv.id,
+        is_defect=report.get("is_defect", "unclear"),
+        verdict_reason=report.get("verdict_reason"),
         root_cause=report.get("root_cause", ""),
         summary=(report.get("root_cause") or "")[:500],
         confidence=float(report.get("confidence") or 0.0),

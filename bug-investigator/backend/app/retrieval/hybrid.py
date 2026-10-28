@@ -121,6 +121,68 @@ class HybridRetriever:
             )
         return results
 
+    @staticmethod
+    def _paths_match(indexed: str, wanted: str) -> bool:
+        """Whether two paths name the same file, comparing from the right.
+
+        Either may carry a prefix the other lacks. Issues are written by hand and frequently add
+        the repository name: pallets/click#3832 points at "click/src/click/core.py" while the index
+        holds "src/click/core.py". Matching only one direction missed every such reference.
+        Comparison is by path component, so "core.py" never matches "my_core.py".
+        """
+        if indexed == wanted:
+            return True
+        a, b = indexed.split("/"), wanted.split("/")
+        shared = min(len(a), len(b))
+        return a[-shared:] == b[-shared:]
+
+    def fetch_file(
+        self, path: str, line: int | None = None, span: int = 40, limit: int = 2
+    ) -> list[Evidence]:
+        """Return indexed chunks for `path`, narrowed to those covering `line` when given.
+
+        Paths are matched on a suffix, so "core.py" finds "src/click/core.py" - a reporter rarely
+        writes the full path from the repository root.
+
+        Without a line number this returns nothing. Handing back the top of a file is worse than
+        useless: a Python module starts with imports, which say nothing about any bug, and those
+        chunks then occupy evidence slots that real search results would have filled. An earlier
+        version did exactly that and turned a correct verdict into "unclear".
+        """
+        wanted = path.strip().lstrip("./")
+        if not wanted or line is None:
+            return []
+
+        matches = [
+            c
+            for c in self._vi.by_id.values()
+            if c.source_type is m.SourceType.code or c.source_type is m.SourceType.doc
+            if self._paths_match(c.source_ref, wanted)
+        ]
+        covering = [
+            c
+            for c in matches
+            if c.start_line is not None
+            and c.start_line - span <= line <= (c.end_line or c.start_line) + span
+        ]
+        if not covering:
+            return []  # a stale line number: say nothing rather than something irrelevant
+
+        # Closest chunk first, so a tight limit still lands on the named line.
+        covering.sort(key=lambda c: abs((c.start_line or 0) - line))
+        return [
+            Evidence(
+                id=self._label(c.id),
+                source_type=c.source_type.value,
+                ref=c.source_ref,
+                text=c.text,
+                start_line=c.start_line,
+                end_line=c.end_line,
+                score=1.0,  # an exact lookup, not a ranked guess
+            )
+            for c in covering[:limit]
+        ]
+
     def chunk_id_for(self, evidence_id: str) -> int | None:
         for cid, label in self._evidence_ids.items():
             if label == evidence_id:

@@ -8,6 +8,15 @@ from app.llm import LLM
 from app.retrieval.base import Retriever
 
 
+def route_after_investigator(state: InvestigationState) -> str:
+    """Only diagnose a fix for something judged to be a defect.
+
+    v1 always ran the fix agent, so every report ended in a patch - including for behaviour the
+    maintainers intend. Proposing a change to working code is worse than saying nothing.
+    """
+    return "fix" if state["analysis"].get("is_defect") == "yes" else "critic"
+
+
 def route_after_critic(state: InvestigationState) -> str:
     """accept -> finalize; revise with iterations left -> planner; otherwise finalize (low confidence)."""
     if state["review"]["verdict"] == "accept":
@@ -24,7 +33,9 @@ def build_graph(llm: LLM, retriever: Retriever, top_k: int = 8):
         g.add_node(name, fn)
     g.add_edge(START, "planner")
     g.add_edge("planner", "investigator")
-    g.add_edge("investigator", "fix")
+    g.add_conditional_edges(
+        "investigator", route_after_investigator, {"fix": "fix", "critic": "critic"}
+    )
     g.add_edge("fix", "critic")
     g.add_conditional_edges("critic", route_after_critic, {"planner": "planner", "finalize": "finalize"})
     g.add_edge("finalize", END)
@@ -33,4 +44,6 @@ def build_graph(llm: LLM, retriever: Retriever, top_k: int = 8):
 
 def run_investigation(llm: LLM, retriever: Retriever, issue: dict, max_iterations: int = 3, top_k: int = 8) -> dict:
     graph = build_graph(llm, retriever, top_k)
-    return graph.invoke({"issue": issue, "max_iterations": max_iterations, "iteration": 0, "trace": []})
+    return graph.invoke(
+        {"issue": issue, "max_iterations": max_iterations, "iteration": 0, "trace": []}
+    )

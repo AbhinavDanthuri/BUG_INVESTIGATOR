@@ -69,6 +69,14 @@ class Verdict(str, enum.Enum):
     revise = "revise"
 
 
+class DefectVerdict(str, enum.Enum):
+    """Whether the report describes a real defect. 'no' is a valid, useful answer."""
+
+    yes = "yes"
+    no = "no"
+    unclear = "unclear"
+
+
 # ---------- knowledge base ----------
 class Repository(Base):
     __tablename__ = "repositories"
@@ -228,6 +236,10 @@ class Report(Base):
     investigation_id: Mapped[int] = mapped_column(
         ForeignKey("investigations.id", ondelete="CASCADE"), unique=True
     )
+    is_defect: Mapped[DefectVerdict] = mapped_column(
+        _enum(DefectVerdict), default=DefectVerdict.unclear
+    )
+    verdict_reason: Mapped[str | None] = mapped_column(Text)
     root_cause: Mapped[str] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float)
@@ -263,8 +275,15 @@ class TestSuggestion(Base):
 
 
 # ---------- evaluation ----------
+class EvalCaseKind(str, enum.Enum):
+    """Positive cases have a known fix; negative cases were closed without one."""
+
+    fixed = "fixed"
+    wont_fix = "wont_fix"
+
+
 class EvalCase(Base):
-    """A closed issue whose real fix is known (files changed in the linked PR)."""
+    """A closed issue with a known outcome: either a fix PR, or a decision not to fix."""
 
     __tablename__ = "eval_cases"
     __table_args__ = (UniqueConstraint("repo_id", "issue_number", name="uq_eval_repo_issue"),)
@@ -272,8 +291,9 @@ class EvalCase(Base):
     id: Mapped[int] = mapped_column(BigPK, primary_key=True, autoincrement=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id", ondelete="CASCADE"))
     issue_number: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[EvalCaseKind] = mapped_column(_enum(EvalCaseKind), default=EvalCaseKind.fixed)
     gold_pr_number: Mapped[int | None] = mapped_column(Integer)
-    gold_files: Mapped[list] = mapped_column(JSON)
+    gold_files: Mapped[list] = mapped_column(JSON)  # empty for wont_fix cases
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -287,4 +307,7 @@ class EvalResult(Base):
     hit_at_1: Mapped[bool] = mapped_column(Boolean)
     hit_at_3: Mapped[bool] = mapped_column(Boolean)
     file_recall: Mapped[float] = mapped_column(Float)
+    # Did it call the defect right? Null for systems with no verdict, such as the BM25 baseline.
+    defect_verdict: Mapped[str | None] = mapped_column(String(10))
+    verdict_correct: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())

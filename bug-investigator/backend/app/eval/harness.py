@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app import runner
 from app.config import Settings
 from app.db import models as m
-from app.eval.metrics import file_recall, hit_at_k, summarize
+from app.eval.metrics import file_recall, hit_at_k, summarize, verdict_is_correct
 from app.github.client import GitHubClient, GitHubError, IssueRef
 from app.ingest.indexer import ready_version
 from app.llm import LLM
@@ -26,12 +26,30 @@ log = logging.getLogger(__name__)
 
 
 def build_eval_cases(
-    db: Session, repo: m.Repository, gh: GitHubClient, limit: int = 20, max_gold_files: int = 5
+    db: Session,
+    repo: m.Repository,
+    gh: GitHubClient,
+    limit: int = 20,
+    max_gold_files: int = 5,
+    wont_fix_limit: int | None = None,
 ) -> list[m.EvalCase]:
-    """Find closed issues linked to exactly one small fix PR, and record the files it changed."""
+    """Build both kinds of case from closed issues.
+
+    Positive (`fixed`): closed by exactly one small PR, whose changed files are the gold answer.
+    Negative (`wont_fix`): closed as not planned with no fix PR - the maintainers decided the
+    behaviour was intended, out of scope, or otherwise not a defect.
+
+    The negatives matter more than they look. An eval built only from fixed issues cannot see the
+    failure where the tool invents a defect and patches working code, because such issues are
+    excluded by construction.
+    """
+    if wont_fix_limit is None:
+        wont_fix_limit = max(1, limit // 2)
     created: list[m.EvalCase] = []
-    for issue in gh.list_issues(repo.owner, repo.name, limit=limit * 10, state="closed"):
-        if len(created) >= limit:
+    n_fixed = n_wont_fix = 0
+
+    for issue in gh.list_issues(repo.owner, repo.name, limit=(limit + wont_fix_limit) * 10, state="closed"):
+        if n_fixed >= limit and n_wont_fix >= wont_fix_limit:
             break
         if issue["is_pr"]:
             continue
@@ -46,7 +64,30 @@ def build_eval_cases(
         except GitHubError as exc:
             log.warning("timeline unavailable for #%s: %s", issue["number"], exc)
             continue
-        if len(prs) != 1:  # ambiguous ground truth
+
+        # ---- negative case: closed as not planned, with no fix ----
+        if not prs:
+            if n_wont_fix >= wont_fix_limit:
+                continue
+            try:
+                if gh.issue_state_reason(repo.owner, repo.name, issue["number"]) != "not_planned":
+                    continue  # closed for some other reason; too ambiguous to score
+            except GitHubError:
+                continue
+            case = m.EvalCase(
+                repo_id=repo.id,
+                issue_number=issue["number"],
+                kind=m.EvalCaseKind.wont_fix,
+                gold_pr_number=None,
+                gold_files=[],
+            )
+            db.add(case)
+            created.append(case)
+            n_wont_fix += 1
+            continue
+
+        # ---- positive case: exactly one small fix PR ----
+        if len(prs) != 1 or n_fixed >= limit:  # several PRs = ambiguous ground truth
             continue
         try:
             files = gh.pr_files(repo.owner, repo.name, prs[0])
@@ -56,11 +97,18 @@ def build_eval_cases(
         if not files or len(files) > max_gold_files:
             continue
         case = m.EvalCase(
-            repo_id=repo.id, issue_number=issue["number"], gold_pr_number=prs[0], gold_files=files
+            repo_id=repo.id,
+            issue_number=issue["number"],
+            kind=m.EvalCaseKind.fixed,
+            gold_pr_number=prs[0],
+            gold_files=files,
         )
         db.add(case)
         created.append(case)
+        n_fixed += 1
+
     db.commit()
+    log.info("built %d fixed and %d wont_fix cases", n_fixed, n_wont_fix)
     return created
 
 
@@ -124,11 +172,15 @@ def run_eval(
     for case in cases:
         issue = _ensure_issue(db, repo, gh, case.issue_number)
 
+        kind = case.kind.value
+
         if "bm25_baseline" in systems:
+            # The baseline retrieves files; it has no notion of whether something is a defect, so
+            # it is only scored on positive cases and carries no verdict.
             try:
                 row = score(run_baseline(db, repo, issue), case.gold_files)
                 db.add(m.EvalResult(eval_case_id=case.id, system="bm25_baseline", **row))
-                results["bm25_baseline"].append(row)
+                results["bm25_baseline"].append({**row, "kind": kind, "verdict_correct": None})
             except Exception:  # noqa: BLE001
                 log.exception("baseline failed for issue #%s", case.issue_number)
 
@@ -147,8 +199,21 @@ def run_eval(
             db.refresh(inv)
             if inv.status == m.RunStatus.completed and inv.report is not None:
                 row = score(inv.report.affected_files or [], case.gold_files)
-                db.add(m.EvalResult(eval_case_id=case.id, investigation_id=inv.id, system="agent", **row))
-                results["agent"].append(row)
+                predicted = inv.report.is_defect.value
+                correct = verdict_is_correct(predicted, kind)
+                db.add(
+                    m.EvalResult(
+                        eval_case_id=case.id,
+                        investigation_id=inv.id,
+                        system="agent",
+                        defect_verdict=predicted,
+                        verdict_correct=correct,
+                        **row,
+                    )
+                )
+                results["agent"].append(
+                    {**row, "kind": kind, "verdict_correct": correct, "defect_verdict": predicted}
+                )
             else:
                 log.warning("agent run failed for issue #%s: %s", case.issue_number, inv.error)
         db.commit()
@@ -157,7 +222,16 @@ def run_eval(
 
 
 def format_summary(summary: dict) -> str:
-    lines = [f"{'system':<16}{'n':>4}{'hit@1':>9}{'hit@3':>9}{'recall':>9}", "-" * 47]
+    """`verdict` is the share of cases where the tool correctly judged defect vs not-a-defect.
+
+    Localization columns cover the `fixed` cases only; `loc` says how many those were.
+    """
+    header = f"{'system':<16}{'n':>4}{'loc':>5}{'hit@1':>8}{'hit@3':>8}{'recall':>8}{'verdict':>9}"
+    lines = [header, "-" * len(header)]
     for system, s in summary.items():
-        lines.append(f"{system:<16}{s['n']:>4}{s['hit@1']:>9.2f}{s['hit@3']:>9.2f}{s['recall']:>9.2f}")
+        verdict = "    n/a" if s.get("verdict") is None else f"{s['verdict']:>9.2f}"
+        lines.append(
+            f"{system:<16}{s['n']:>4}{s['localized']:>5}"
+            f"{s['hit@1']:>8.2f}{s['hit@3']:>8.2f}{s['recall']:>8.2f}{verdict}"
+        )
     return "\n".join(lines)

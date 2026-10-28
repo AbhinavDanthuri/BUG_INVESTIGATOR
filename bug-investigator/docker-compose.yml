@@ -7,7 +7,7 @@ services:
       MYSQL_USER: bugi
       MYSQL_PASSWORD: bugi
     ports:
-      - "3309:3306"
+      - "3309:3306"   # 3307 on the host: a locally installed MySQL usually owns 3306
     volumes:
       - mysql_data:/var/lib/mysql
       - ./backend/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro

@@ -13,10 +13,17 @@ ISSUE_BODY = "Calling average([]) raises ZeroDivisionError instead of returning 
 class ScriptedLLM:
     """Answers by ROLE, citing whichever evidence the retriever actually returned."""
 
-    def __init__(self, verdicts=("accept",), cite_real=True, affected=("src/stats.py",)):
+    def __init__(
+        self,
+        verdicts=("accept",),
+        cite_real=True,
+        affected=("src/stats.py",),
+        is_defect="yes",
+    ):
         self.verdicts = list(verdicts)
         self.cite_real = cite_real
         self.affected = list(affected)
+        self.is_defect = is_defect
         self.seen_evidence_ids: list[str] = []
 
     def invoke_json(self, system, user):
@@ -30,6 +37,12 @@ class ScriptedLLM:
             ids = [line.split("]")[0][1:] for line in user.splitlines() if line.startswith("[E")]
             self.seen_evidence_ids = ids
             return {
+                "is_defect": self.is_defect,
+                "verdict_reason": (
+                    "documented to raise on empty input"
+                    if self.is_defect == "no"
+                    else "crashes on input the docs say is valid"
+                ),
                 "root_cause": "average() computes sum/len without checking for an empty list",
                 "confidence": 0.85,
                 "affected_files": self.affected,
@@ -125,7 +138,7 @@ def test_critic_revision_loops_and_records_each_pass(db, settings, queued):
     assert inv.status is m.RunStatus.completed
     assert inv.iterations == 2
     assert db.query(m.CriticReview).filter_by(investigation_id=inv.id).count() == 2
-    assert db.query(m.AgentStep).filter_by(investigation_id=inv.id).count() == 8
+    assert db.query(m.AgentStep).filter_by(investigation_id=inv.id).count() == 8  # 4 agents x 2 passes
 
 
 def test_ungrounded_answer_is_forced_low_confidence(db, settings, queued):
@@ -167,3 +180,39 @@ def test_agent_step_output_is_queryable_json(db, settings, queued):
     inv = runner.run(db, queued.id, ScriptedLLM(), settings)
     planner = db.query(m.AgentStep).filter_by(investigation_id=inv.id, agent=m.AgentName.planner).one()
     assert json.loads(json.dumps(planner.output))["hypotheses"]
+
+
+# ---------- the defect verdict, end to end ----------
+def test_non_defect_run_persists_a_verdict_and_no_fix(db, settings, queued):
+    """The pallets/click#3887 failure: v1 would have written a patch for intended behaviour."""
+    inv = runner.run(db, queued.id, ScriptedLLM(is_defect="no"), settings)
+
+    assert inv.status is m.RunStatus.completed
+    report = db.query(m.Report).filter_by(investigation_id=inv.id).one()
+    assert report.is_defect is m.DefectVerdict.no
+    assert report.verdict_reason
+    assert db.query(m.FixSuggestion).filter_by(report_id=report.id).count() == 0
+    assert db.query(m.TestSuggestion).filter_by(report_id=report.id).count() == 0
+
+    steps = [s.agent.value for s in db.query(m.AgentStep).filter_by(investigation_id=inv.id)]
+    assert "fix" not in steps
+
+    # still explains the mechanism, and says plainly why no patch
+    assert "## Why no fix is proposed" in report.report_md
+    assert "Does not look like a defect" in report.report_md
+    assert report.root_cause
+
+
+def test_defect_run_still_records_a_fix(db, settings, queued):
+    inv = runner.run(db, queued.id, ScriptedLLM(is_defect="yes"), settings)
+    report = db.query(m.Report).filter_by(investigation_id=inv.id).one()
+    assert report.is_defect is m.DefectVerdict.yes
+    assert db.query(m.FixSuggestion).filter_by(report_id=report.id).count() == 1
+    assert "## Root cause" in report.report_md
+
+
+def test_unclear_verdict_is_reported_honestly(db, settings, queued):
+    inv = runner.run(db, queued.id, ScriptedLLM(is_defect="unclear"), settings)
+    report = db.query(m.Report).filter_by(investigation_id=inv.id).one()
+    assert report.is_defect is m.DefectVerdict.unclear
+    assert "Cannot tell from the evidence" in report.report_md

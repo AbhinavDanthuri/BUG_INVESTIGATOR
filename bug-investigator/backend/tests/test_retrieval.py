@@ -76,3 +76,83 @@ def test_bm25_baseline_finds_exact_identifier(db, indexed_repo):
 def test_unrelated_query_does_not_rank_the_bug_file_first(retriever):
     hits = retriever.search("socket connection timeout host port", ["code"], k=3)
     assert hits[0].ref == "src/network.py"
+
+
+# ---------- direct lookup ----------
+def test_fetch_file_returns_the_chunk_covering_a_named_line(retriever):
+    hits = retriever.fetch_file("src/stats.py", line=5)
+    assert hits
+    assert all(h.ref == "src/stats.py" for h in hits)
+    assert all(h.score == 1.0 for h in hits)  # an exact lookup, not a ranked guess
+    assert hits[0].start_line <= 5 + 40
+
+
+def test_fetch_file_matches_a_bare_filename(retriever):
+    """Reporters write 'stats.py', not the path from the repository root."""
+    assert [h.ref for h in retriever.fetch_file("stats.py", line=3)] == ["src/stats.py"]
+
+
+def test_fetch_file_without_a_line_returns_nothing(retriever):
+    """The top of a file is imports. Returning it wastes evidence slots search would have used -
+    the regression that turned a correct verdict into 'unclear'."""
+    assert retriever.fetch_file("src/stats.py") == []
+    assert retriever.fetch_file("src/stats.py", line=None) == []
+
+
+def test_fetch_file_returns_nothing_for_a_stale_line(retriever):
+    """A line number from an old issue may no longer exist; say nothing rather than something
+    irrelevant."""
+    assert retriever.fetch_file("src/stats.py", line=99999) == []
+
+
+def test_fetch_file_returns_nothing_for_an_unknown_path(retriever):
+    assert retriever.fetch_file("src/does_not_exist.py", line=1) == []
+    assert retriever.fetch_file("", line=1) == []
+
+
+def test_fetch_file_respects_its_limit(retriever):
+    assert len(retriever.fetch_file("src/stats.py", line=5, limit=1)) <= 1
+
+
+def test_fetch_file_prefers_the_chunk_closest_to_the_line(retriever):
+    """With a tight limit, the chunk actually containing the line must win."""
+    hits = retriever.fetch_file("src/stats.py", line=1, limit=1)
+    assert hits and hits[0].start_line == 1
+
+
+def test_fetch_file_ids_are_consistent_with_search(retriever):
+    """The same chunk must keep one E-label however it was found, or citations break."""
+    searched = {h.ref: h.id for h in retriever.search("average", ["code"], k=5)}
+    fetched = retriever.fetch_file("src/stats.py", line=1)
+    if "src/stats.py" in searched and fetched:
+        assert any(h.id == searched["src/stats.py"] for h in fetched)
+
+
+def test_fetch_file_ignores_non_code_sources(retriever):
+    """Commit and issue chunks have no path; a path lookup must not match them."""
+    assert all(h.source_type in ("code", "doc") for h in retriever.fetch_file("stats.py", line=1))
+
+
+# ---------- path matching ----------
+@pytest.mark.parametrize(
+    "indexed,wanted,expected",
+    [
+        ("src/click/core.py", "src/click/core.py", True),      # identical
+        ("src/click/core.py", "core.py", True),                # bare filename
+        ("src/click/core.py", "click/core.py", True),          # partial path
+        # pallets/click#3832 writes "click/src/click/core.py": a repo-name prefix the index lacks.
+        ("src/click/core.py", "click/src/click/core.py", True),
+        ("src/click/core.py", "src/click/types.py", False),    # different file
+        ("src/click/core.py", "my_core.py", False),            # suffix of the name, not a component
+        ("src/click/core.py", "other/core.py", False),         # same name, different directory
+    ],
+)
+def test_paths_match(indexed, wanted, expected):
+    from app.retrieval.hybrid import HybridRetriever
+
+    assert HybridRetriever._paths_match(indexed, wanted) is expected
+
+
+def test_fetch_file_handles_a_repo_prefixed_path(retriever):
+    """The exact shape that silently returned nothing on a real issue."""
+    assert [h.ref for h in retriever.fetch_file("sample/src/stats.py", line=3)] == ["src/stats.py"]

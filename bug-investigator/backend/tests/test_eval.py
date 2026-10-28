@@ -1,5 +1,7 @@
 """Eval metrics and the harness wiring (GitHub stubbed, index and retrieval real)."""
 
+import pytest
+
 from app.db import models as m
 from app.eval.harness import run_baseline, run_eval, score
 from app.eval.metrics import file_recall, hit_at_k, summarize
@@ -32,7 +34,8 @@ def test_summarize_averages_and_handles_empty():
         {"hit_at_1": False, "hit_at_3": True, "file_recall": 0.5},
     ]
     s = summarize(rows)
-    assert s == {"n": 2, "hit@1": 0.5, "hit@3": 1.0, "recall": 0.75}
+    assert (s["n"], s["localized"], s["hit@1"], s["hit@3"], s["recall"]) == (2, 2, 0.5, 1.0, 0.75)
+    assert s["verdict"] is None  # nothing judged
     assert summarize([])["n"] == 0
 
 
@@ -68,13 +71,22 @@ def test_run_eval_scores_agent_against_baseline(db, settings, indexed_repo):
             body="average([]) raises ZeroDivisionError", state="closed", html_url="u",
         )
     )
-    db.add(m.EvalCase(repo_id=repo.id, issue_number=5, gold_pr_number=6, gold_files=["src/stats.py"]))
+    db.add(
+        m.EvalCase(
+            repo_id=repo.id,
+            issue_number=5,
+            kind=m.EvalCaseKind.fixed,
+            gold_pr_number=6,
+            gold_files=["src/stats.py"],
+        )
+    )
     db.commit()
 
     summary = run_eval(db, repo, settings, ScriptedLLM(), StubGH())
 
     assert summary["agent"]["n"] == 1
     assert summary["agent"]["hit@1"] == 1.0  # scripted agent predicts src/stats.py
+    assert summary["agent"]["verdict"] == 1.0  # called a fixed issue a defect
     assert summary["bm25_baseline"]["n"] == 1
     assert 0.0 <= summary["bm25_baseline"]["hit@3"] <= 1.0
 
@@ -86,7 +98,11 @@ def test_run_eval_scores_agent_against_baseline(db, settings, indexed_repo):
 def test_run_eval_marks_a_miss_when_the_agent_names_the_wrong_file(db, settings, indexed_repo):
     repo, _ = indexed_repo
     db.add(m.Issue(repo_id=repo.id, number=7, title="t", body="b", state="closed", html_url="u"))
-    db.add(m.EvalCase(repo_id=repo.id, issue_number=7, gold_files=["src/stats.py"]))
+    db.add(
+        m.EvalCase(
+            repo_id=repo.id, issue_number=7, kind=m.EvalCaseKind.fixed, gold_files=["src/stats.py"]
+        )
+    )
     db.commit()
 
     summary = run_eval(
@@ -99,5 +115,156 @@ def test_run_eval_marks_a_miss_when_the_agent_names_the_wrong_file(db, settings,
 def test_format_summary_is_readable():
     from app.eval.harness import format_summary
 
-    text = format_summary({"agent": {"n": 2, "hit@1": 0.5, "hit@3": 1.0, "recall": 0.75}})
-    assert "agent" in text and "0.50" in text and "hit@1" in text
+    text = format_summary(
+        {"agent": {"n": 2, "localized": 2, "hit@1": 0.5, "hit@3": 1.0, "recall": 0.75, "verdict": 0.5}}
+    )
+    assert "agent" in text and "0.50" in text and "hit@1" in text and "verdict" in text
+
+    no_verdict = format_summary(
+        {"bm25": {"n": 1, "localized": 1, "hit@1": 0.0, "hit@3": 0.0, "recall": 0.0, "verdict": None}}
+    )
+    assert "n/a" in no_verdict  # the baseline has no notion of a defect
+
+
+# ---------- negative (won't-fix) cases ----------
+@pytest.mark.parametrize(
+    "predicted,kind,expected",
+    [
+        ("yes", "fixed", True),
+        ("no", "fixed", False),
+        ("unclear", "fixed", False),      # failed to find a real defect
+        ("no", "wont_fix", True),
+        ("unclear", "wont_fix", True),    # declining to patch is what matters
+        ("yes", "wont_fix", False),       # the pallets/click#3887 failure
+    ],
+)
+def test_verdict_is_correct(predicted, kind, expected):
+    from app.eval.metrics import verdict_is_correct
+
+    assert verdict_is_correct(predicted, kind) is expected
+
+
+def test_summarize_separates_localization_from_verdict():
+    """Won't-fix cases have no gold files, so they must not drag the localization average down."""
+    rows = [
+        {"kind": "fixed", "hit_at_1": True, "hit_at_3": True, "file_recall": 1.0, "verdict_correct": True},
+        {"kind": "wont_fix", "hit_at_1": False, "hit_at_3": False, "file_recall": 0.0, "verdict_correct": False},
+    ]
+    s = summarize(rows)
+    assert s["n"] == 2
+    assert s["localized"] == 1
+    assert s["hit@1"] == 1.0   # scored on the one positive case only
+    assert s["verdict"] == 0.5  # scored across both
+
+
+def test_run_eval_scores_a_wont_fix_case(db, settings, indexed_repo):
+    """The regression that matters: patching intended behaviour must score as wrong."""
+    repo, _ = indexed_repo
+    db.add(
+        m.Issue(
+            repo_id=repo.id, number=9, title="average should return None for empty input",
+            body="I would prefer a different design", state="closed", html_url="u",
+        )
+    )
+    db.add(m.EvalCase(repo_id=repo.id, issue_number=9, kind=m.EvalCaseKind.wont_fix, gold_files=[]))
+    db.commit()
+
+    # a tool that insists everything is a defect
+    wrong = run_eval(db, repo, settings, ScriptedLLM(is_defect="yes"), StubGH(), systems=("agent",))
+    assert wrong["agent"]["verdict"] == 0.0
+    assert wrong["agent"]["localized"] == 0  # no positive cases to localize
+
+    row = db.query(m.EvalResult).filter_by(system="agent").one()
+    assert row.defect_verdict == "yes"
+    assert row.verdict_correct is False
+
+
+def test_run_eval_rewards_declining_to_patch(db, settings, indexed_repo):
+    repo, _ = indexed_repo
+    db.add(
+        m.Issue(
+            repo_id=repo.id, number=11, title="works as documented but I disagree",
+            body="please change it", state="closed", html_url="u",
+        )
+    )
+    db.add(m.EvalCase(repo_id=repo.id, issue_number=11, kind=m.EvalCaseKind.wont_fix, gold_files=[]))
+    db.commit()
+
+    right = run_eval(db, repo, settings, ScriptedLLM(is_defect="no"), StubGH(), systems=("agent",))
+    assert right["agent"]["verdict"] == 1.0
+
+
+def test_baseline_carries_no_verdict(db, settings, indexed_repo):
+    """BM25 retrieves files; it cannot judge intent, so it must not be scored as if it could."""
+    repo, _ = indexed_repo
+    db.add(
+        m.Issue(repo_id=repo.id, number=13, title="average crashes", body="on empty", state="closed", html_url="u")
+    )
+    db.add(m.EvalCase(repo_id=repo.id, issue_number=13, kind=m.EvalCaseKind.fixed, gold_files=["src/stats.py"]))
+    db.commit()
+
+    summary = run_eval(db, repo, settings, ScriptedLLM(), StubGH(), systems=("bm25_baseline",))
+    assert summary["bm25_baseline"]["verdict"] is None
+
+
+class _DiscoveryGH:
+    """A repo with one fixed issue, one won't-fix, and one closed for an unscoreable reason."""
+
+    def __init__(self):
+        self.issues = [
+            {"number": 1, "title": "crash", "body": "", "is_pr": False},
+            {"number": 2, "title": "please redesign this", "body": "", "is_pr": False},
+            {"number": 3, "title": "closed as duplicate", "body": "", "is_pr": False},
+            {"number": 4, "title": "a pull request", "body": "", "is_pr": True},
+        ]
+
+    def list_issues(self, owner, repo, limit=300, state="all"):
+        return self.issues
+
+    def issue_timeline_closers(self, owner, repo, number):
+        return [99] if number == 1 else []
+
+    def issue_state_reason(self, owner, repo, number):
+        return "not_planned" if number == 2 else "completed"
+
+    def pr_files(self, owner, repo, number, limit=100):
+        return ["src/stats.py", "tests/test_stats.py"]
+
+
+def test_build_eval_cases_discovers_both_kinds(db, indexed_repo):
+    from app.eval.harness import build_eval_cases
+
+    repo, _ = indexed_repo
+    created = build_eval_cases(db, repo, _DiscoveryGH(), limit=5, wont_fix_limit=5)
+
+    by_number = {c.issue_number: c for c in created}
+    assert set(by_number) == {1, 2}  # the PR and the ambiguous close are skipped
+
+    fixed = by_number[1]
+    assert fixed.kind is m.EvalCaseKind.fixed
+    assert fixed.gold_pr_number == 99
+    assert fixed.gold_files == ["src/stats.py"]  # test files excluded from the gold set
+
+    wont_fix = by_number[2]
+    assert wont_fix.kind is m.EvalCaseKind.wont_fix
+    assert wont_fix.gold_files == []
+    assert wont_fix.gold_pr_number is None
+
+
+def test_build_eval_cases_skips_closes_that_are_not_wont_fix(db, indexed_repo):
+    """An issue closed as a duplicate tells us nothing about whether it was a defect."""
+    from app.eval.harness import build_eval_cases
+
+    repo, _ = indexed_repo
+    created = build_eval_cases(db, repo, _DiscoveryGH(), limit=5, wont_fix_limit=5)
+    assert 3 not in {c.issue_number for c in created}
+
+
+def test_build_eval_cases_is_idempotent(db, indexed_repo):
+    from app.eval.harness import build_eval_cases
+
+    repo, _ = indexed_repo
+    gh = _DiscoveryGH()
+    first = build_eval_cases(db, repo, gh, limit=5, wont_fix_limit=5)
+    second = build_eval_cases(db, repo, gh, limit=5, wont_fix_limit=5)
+    assert len(first) == 2 and second == []

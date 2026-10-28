@@ -1,7 +1,12 @@
 const SUMMARY = {
-  planner: (o) => `${(o.queries || []).length} queries · ${(o.hypotheses || []).length} hypotheses`,
+  planner: (o) =>
+    `${(o.queries || []).length} queries · ${(o.lookups || []).length} lookups · ${
+      (o.hypotheses || []).length
+    } hypotheses`,
   investigator: (o) =>
-    `${o.evidence_retrieved ?? 0} chunks · confidence ${Math.round((o.confidence ?? 0) * 100)}%`,
+    `${o.evidence_retrieved ?? 0} chunks${o.looked_up ? ` (${o.looked_up} looked up)` : ""} · ${
+      o.is_defect === "yes" ? "defect" : o.is_defect === "no" ? "not a defect" : "unclear"
+    } · confidence ${Math.round((o.confidence ?? 0) * 100)}%`,
   fix: (o) => `${(o.tests || []).length} test(s) suggested`,
   critic: (o) => o.verdict || "",
 };

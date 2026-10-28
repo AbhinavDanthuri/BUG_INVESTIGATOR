@@ -24,3 +24,12 @@ class Evidence:
 
 class Retriever(Protocol):
     def search(self, query: str, source_types: list[str] | None = None, k: int = 8) -> list[Evidence]: ...
+
+    def fetch_file(self, path: str, line: int | None = None, span: int = 40) -> list[Evidence]:
+        """Look a location up directly, rather than searching for it.
+
+        Bug reports usually name the place ("core.py line 1391"). Similarity search is the wrong
+        instrument for that: it ranks by resemblance when the address is already known. Without
+        this, an agent that knows exactly where to look still has to guess its way there.
+        """
+        ...

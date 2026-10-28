@@ -102,7 +102,9 @@ def cmd_eval(args) -> int:
         gh = GitHubClient(settings.github_token)
         repo = _repo(db, gh, owner, name)
         if args.build_cases:
-            created = build_eval_cases(db, repo, gh, limit=args.build_cases)
+            created = build_eval_cases(
+                db, repo, gh, limit=args.build_cases, wont_fix_limit=args.wont_fix_cases
+            )
             print(f"built {len(created)} new eval cases")
         systems = ("bm25_baseline",) if args.baseline_only else ("agent", "bm25_baseline")
         summary = run_eval(db, repo, settings, get_llm(settings), gh, systems=systems, limit=args.limit)
@@ -135,7 +137,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p_eval = sub.add_parser("eval", help="score the agent against the BM25 baseline")
     p_eval.add_argument("repo", help="owner/name")
-    p_eval.add_argument("--build-cases", type=int, default=0, help="discover N new eval cases first")
+    p_eval.add_argument("--build-cases", type=int, default=0, help="discover N fixed-issue cases first")
+    p_eval.add_argument(
+        "--wont-fix-cases",
+        type=int,
+        default=None,
+        help="won't-fix cases to discover too (default: half of --build-cases)",
+    )
     p_eval.add_argument("--limit", type=int, default=None, help="only score the first N cases")
     p_eval.add_argument("--baseline-only", action="store_true", help="skip the LLM; score BM25 only")
     p_eval.set_defaults(func=cmd_eval)

@@ -2,7 +2,7 @@
 
 | Layer | Choice | Why | Alternative |
 |-------|--------|-----|-------------|
-| Language | Python 3.11+ | LangGraph, FAISS, sentence-transformers are all Python-first | — |
+| Language | Python 3.10+ | LangGraph, FAISS, sentence-transformers are all Python-first | — |
 | API | FastAPI + Uvicorn | Async, typed, auto docs at `/docs`; matches the resume line | Flask |
 | Agent orchestration | LangGraph | Explicit graph with conditional edges is exactly the critic loop | Plain Python loop |
 | LLM access | LangChain chat model wrappers behind a small `LLM` interface | Swap providers without touching agent code | Direct SDKs |

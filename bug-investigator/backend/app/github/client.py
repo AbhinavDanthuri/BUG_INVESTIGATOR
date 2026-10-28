@@ -96,6 +96,11 @@ class GitHubClient:
     def get_pull(self, owner: str, repo: str, number: int) -> dict:
         return self._get(f"/repos/{owner}/{repo}/pulls/{number}")  # type: ignore[return-value]
 
+    def issue_state_reason(self, owner: str, repo: str, number: int) -> str | None:
+        """'completed' or 'not_planned'. A not_planned close is how maintainers say "won't fix"."""
+        data = self._get(f"/repos/{owner}/{repo}/issues/{number}")
+        return data.get("state_reason")  # type: ignore[union-attr]
+
     def issue_timeline_closers(self, owner: str, repo: str, number: int) -> list[int]:
         """PR numbers that closed this issue (used to build eval ground truth)."""
         events = self._get(

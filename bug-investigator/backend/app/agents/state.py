@@ -16,7 +16,7 @@ class InvestigationState(TypedDict, total=False):
     # agent outputs
     plan: dict  # {hypotheses: [...], queries: [{q, sources}]}
     evidence: list[dict]  # merged across iterations, keyed by id
-    analysis: dict  # {root_cause, confidence, affected_files, reasoning, evidence_ids}
+    analysis: dict  # {is_defect, verdict_reason, root_cause, confidence, affected_files, ...}
     fix: dict  # {file, diff, explanation}
     tests: list[dict]  # [{name, code, rationale}]
     review: dict  # {verdict, scores, feedback}
