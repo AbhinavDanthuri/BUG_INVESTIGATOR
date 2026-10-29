@@ -268,3 +268,86 @@ def test_build_eval_cases_is_idempotent(db, indexed_repo):
     first = build_eval_cases(db, repo, gh, limit=5, wont_fix_limit=5)
     second = build_eval_cases(db, repo, gh, limit=5, wont_fix_limit=5)
     assert len(first) == 2 and second == []
+
+
+# ---------- ground truth: found by reading real eval cases ----------
+class _MixedGH(_DiscoveryGH):
+    """Closes that look like cases but are not: a docs-only fix and a process rejection."""
+
+    def __init__(self):
+        self.issues = [
+            {"number": 10, "title": "docs fix", "body": "", "is_pr": False, "labels": []},
+            {"number": 11, "title": "ai report", "body": "", "is_pr": False, "labels": ["rejected AI"]},
+            {"number": 12, "title": "real wont fix", "body": "", "is_pr": False, "labels": ["wontfix"]},
+        ]
+
+    def issue_timeline_closers(self, owner, repo, number):
+        return [77] if number == 10 else []
+
+    def issue_state_reason(self, owner, repo, number):
+        return "not_planned"
+
+    def pr_files(self, owner, repo, number, limit=100):
+        return ["docs/faqs.md", "CHANGES.rst"]
+
+
+def test_a_docs_only_fix_is_not_a_defect_case(db, indexed_repo):
+    """pallets/click#3887 was answered by an FAQ entry; scoring it as a missed bug is wrong."""
+    from app.eval.harness import build_eval_cases
+
+    repo, _ = indexed_repo
+    created = build_eval_cases(db, repo, _MixedGH(), limit=5, wont_fix_limit=5)
+    assert 10 not in {c.issue_number for c in created}
+
+
+def test_a_process_rejection_is_not_a_wont_fix_case(db, indexed_repo):
+    """pallets/click#3892 described a plausible crash and was closed as 'rejected AI'."""
+    from app.eval.harness import build_eval_cases
+
+    repo, _ = indexed_repo
+    created = build_eval_cases(db, repo, _MixedGH(), limit=5, wont_fix_limit=5)
+    assert {c.issue_number for c in created} == {12}  # the genuine wontfix survives
+
+
+def _timeline_event(number, *, merged=True, repo="o/r", body="Fixes #5"):
+    return {
+        "event": "cross-referenced",
+        "source": {
+            "issue": {
+                "number": number,
+                "title": "a change",
+                "body": body,
+                "repository_url": f"https://api.github.com/repos/{repo}",
+                "pull_request": {"merged_at": "2026-01-01T00:00:00Z" if merged else None},
+            }
+        },
+    }
+
+
+def _closers(events):
+    from app.github.client import GitHubClient
+
+    gh = GitHubClient("t")
+    gh._get = lambda path, **kw: events  # type: ignore[method-assign]
+    return gh.issue_timeline_closers("o", "r", 5)
+
+
+def test_a_merged_pr_that_says_it_fixes_the_issue_counts():
+    assert _closers([_timeline_event(9)]) == [9]
+
+
+def test_a_pr_from_another_repository_does_not_count():
+    """pallets/click#3846 'was fixed by PR 1', which was a different repository's PR 1."""
+    assert _closers([_timeline_event(1, repo="someone/else")]) == []
+
+
+def test_a_pr_that_merely_mentions_the_issue_does_not_count():
+    assert _closers([_timeline_event(9, body="see also #5 for context")]) == []
+
+
+def test_an_unmerged_pr_does_not_count():
+    assert _closers([_timeline_event(9, merged=False)]) == []
+
+
+def test_closing_keyword_for_a_different_issue_does_not_count():
+    assert _closers([_timeline_event(9, body="Fixes #55")]) == []

@@ -101,6 +101,10 @@ def cmd_eval(args) -> int:
     with session_scope() as db:
         gh = GitHubClient(settings.github_token)
         repo = _repo(db, gh, owner, name)
+        if args.reset_cases:
+            n = db.query(m.EvalCase).filter(m.EvalCase.repo_id == repo.id).delete()
+            db.commit()
+            print(f"removed {n} old eval cases")
         if args.build_cases:
             created = build_eval_cases(
                 db, repo, gh, limit=args.build_cases, wont_fix_limit=args.wont_fix_cases
@@ -143,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="won't-fix cases to discover too (default: half of --build-cases)",
+    )
+    p_eval.add_argument(
+        "--reset-cases", action="store_true", help="delete this repo's existing eval cases first"
     )
     p_eval.add_argument("--limit", type=int, default=None, help="only score the first N cases")
     p_eval.add_argument("--baseline-only", action="store_true", help="skip the LLM; score BM25 only")

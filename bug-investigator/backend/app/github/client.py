@@ -102,17 +102,28 @@ class GitHubClient:
         return data.get("state_reason")  # type: ignore[union-attr]
 
     def issue_timeline_closers(self, owner: str, repo: str, number: int) -> list[int]:
-        """PR numbers that closed this issue (used to build eval ground truth)."""
-        events = self._get(
-            f"/repos/{owner}/{repo}/issues/{number}/timeline", per_page=100
+        """PR numbers that closed this issue (used to build eval ground truth).
+
+        A timeline "cross-referenced" event only means some PR mentioned the issue. Counting every
+        mention produced wrong ground truth: a PR from a different repository can share a number
+        with one here, and a PR that merely discusses an issue did not fix it. So a PR counts only
+        when it is in this repository, was merged, and says it closes this issue.
+        """
+        events = self._get(f"/repos/{owner}/{repo}/issues/{number}/timeline", per_page=100)
+        closing = re.compile(
+            rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:[\w.-]+/[\w.-]+)?#{number}\b",
+            re.IGNORECASE,
         )
         prs: list[int] = []
         for ev in events:  # type: ignore[union-attr]
-            if ev.get("event") in ("cross-referenced", "closed", "connected"):
-                src = ev.get("source") or {}
-                issue = src.get("issue") or {}
-                if "pull_request" in issue:
-                    prs.append(issue["number"])
-                elif ev.get("commit_id") is None and issue.get("number"):
-                    continue
+            if ev.get("event") != "cross-referenced":
+                continue
+            issue = (ev.get("source") or {}).get("issue") or {}
+            pull = issue.get("pull_request")
+            if not pull or not pull.get("merged_at"):
+                continue
+            if not (issue.get("repository_url") or "").lower().endswith(f"/{owner}/{repo}".lower()):
+                continue
+            if closing.search(f"{issue.get('title') or ''}\n{issue.get('body') or ''}"):
+                prs.append(issue["number"])
         return sorted(set(prs))

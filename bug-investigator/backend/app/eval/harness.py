@@ -24,6 +24,26 @@ from app.retrieval.hybrid import BM25OnlyRetriever
 
 log = logging.getLogger(__name__)
 
+# A "not planned" close is only a usable negative when the maintainers judged the behaviour. These
+# labels mean it was closed for some other reason (pallets/click#3892 describes a plausible crash,
+# but was closed as "rejected AI" because of where the report came from).
+_PROCESS_LABELS = ("rejected", "duplicate", "invalid", "spam", "stale")
+
+_DOC_SUFFIXES = (".md", ".rst", ".txt")
+
+
+def _is_code_file(path: str) -> bool:
+    """Gold files for localization must be code: not tests, and not docs.
+
+    A docs-only fix (pallets/click#3887 was answered by an FAQ entry) is the maintainers deciding
+    to document behaviour, not repairing a defect. Scoring it as a missed bug penalises the agent
+    for being right.
+    """
+    low = path.lower()
+    if low.startswith(("test", "docs/", "doc/")) or "/test" in low:
+        return False
+    return not low.endswith(_DOC_SUFFIXES)
+
 
 def build_eval_cases(
     db: Session,
@@ -69,6 +89,8 @@ def build_eval_cases(
         if not prs:
             if n_wont_fix >= wont_fix_limit:
                 continue
+            if any(p in lbl.lower() for lbl in issue.get("labels", []) for p in _PROCESS_LABELS):
+                continue
             try:
                 if gh.issue_state_reason(repo.owner, repo.name, issue["number"]) != "not_planned":
                     continue  # closed for some other reason; too ambiguous to score
@@ -93,7 +115,7 @@ def build_eval_cases(
             files = gh.pr_files(repo.owner, repo.name, prs[0])
         except GitHubError:
             continue
-        files = [f for f in files if not f.startswith("test") and "/test" not in f]
+        files = [f for f in files if _is_code_file(f)]
         if not files or len(files) > max_gold_files:
             continue
         case = m.EvalCase(

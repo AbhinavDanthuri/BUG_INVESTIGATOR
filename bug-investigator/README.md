@@ -80,7 +80,7 @@ docker compose up -d mysql
 cd backend
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-pytest                                              # 107 tests, no API key or network needed
+pytest                                              # 186 tests, no API key or network needed
 
 python -m app.cli index pallets/click
 python -m app.cli run https://github.com/pallets/click/issues/3887
@@ -132,7 +132,7 @@ bm25_baseline      ?    ?       ?       ?       ?      n/a
 - **`hit@1` / `hit@3` / `recall`** — did the predicted files match the ones the real fix touched.
 - **`verdict`** — share of cases where the tool correctly judged defect vs not-a-defect. The baseline has no notion of intent, so it is `n/a` rather than zero.
 
-Positive cases come from issues closed by exactly one PR touching five or fewer non-test files, so the ground truth is unambiguous. Negative cases come from issues closed as *not planned* with no fix. On a negative case, both `no` and `unclear` count as correct — declining to patch is the behaviour that matters.
+Positive cases come from issues closed by exactly one merged PR in the same repository that says it fixes the issue, touching five or fewer code files (tests and docs don't count, and a docs-only fix is skipped), so the ground truth is unambiguous. Negative cases come from issues closed as *not planned* with no fix, minus closes made for process reasons (labels like `rejected`, `duplicate`, `stale`). On a negative case, both `no` and `unclear` count as correct — declining to patch is the behaviour that matters.
 
 ---
 
@@ -149,7 +149,7 @@ backend/tests/
   test_eval.py       metrics and harness wiring
 ```
 
-107 tests. Nothing hits the network or needs an API key. `conftest.py` builds a throwaway git repository containing a real bug — `average()` divides by `len()` with no empty-list guard — and indexes it for real, so retrieval and persistence are tested against genuine artifacts rather than mocks.
+186 tests. Nothing hits the network or needs an API key. `conftest.py` builds a throwaway git repository containing a real bug — `average()` divides by `len()` with no empty-list guard — and indexes it for real, so retrieval and persistence are tested against genuine artifacts rather than mocks.
 
 ---
 
@@ -191,4 +191,6 @@ Worth recording, because none of these appeared in tests:
 - **Batching embeddings by item count** rather than token count meant a single request could exceed a whole minute's quota — so every retry failed no matter how long it waited. Now batched by estimated tokens and paced against a sliding 60-second window.
 - **Rate-limit responses carry the wait time.** Honoring the API's own `retryDelay` beats doubling a guess — but a multi-hour delay means a daily quota, not a burst, so it now fails loudly instead of sleeping until tomorrow.
 - **Transient 503s are not failures.** A provider under load should be retried; a 400 should not.
+- **The first eval's ground truth was wrong in three ways.** Reading the individual cases showed a "fix PR" that was a different repository's PR #1, a docs-only fix scored as a missed bug, and a "won't fix" that was really a rejected AI-generated report. Each case-builder rule above exists because of one of those.
+- **The fix agent ignored the diff format however it was asked.** Even with a worked example in the prompt it kept writing `*** Begin Patch` blocks with no line numbers. Prompting didn't fix it, so the conversion is code: the patch's context lines are located in the evidence the model was shown, which yields real line numbers and a valid unified diff. When a patch can't be placed, the report says so instead of presenting it as applicable.
 - **Issue history is a bonus, not a requirement.** A GitHub hiccup used to throw away an otherwise complete code index.

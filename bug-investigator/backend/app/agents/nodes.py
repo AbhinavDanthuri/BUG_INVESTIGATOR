@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 
 from app.agents import prompts
+from app.agents.diffs import normalize_diff
 from app.agents.locations import extract_locations
 from app.agents.state import InvestigationState
 from app.llm import LLM
@@ -112,6 +113,10 @@ def make_nodes(llm: LLM, retriever: Retriever, top_k: int = 8) -> dict[str, Call
         result = llm.invoke_json(prompts.FIX, user)
         fix_ = result.get("fix") or {}
         tests = result.get("tests") or []
+        if fix_.get("diff"):
+            fix_["diff"], fix_["diff_valid"] = normalize_diff(
+                str(fix_["diff"]), str(fix_.get("file", "")), state["evidence"]
+            )
         return {"fix": fix_, "tests": tests, "trace": [_trace("fix", state, t0, result)]}
 
     def critic(state: InvestigationState) -> dict:

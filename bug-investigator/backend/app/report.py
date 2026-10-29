@@ -54,6 +54,8 @@ def render_markdown(issue: dict, report: dict, repo_full_name: str) -> str:
     fix = report.get("fix") or {}
     if fix.get("diff"):
         lines += ["", "## Suggested fix", "", f"`{fix.get('file', '')}`", "", "```diff", fix["diff"].rstrip(), "```"]
+        if fix.get("diff_valid") is False:
+            lines += ["", "> The patch above could not be verified as a valid diff. Read it as a sketch of the change, not something to apply."]
         if fix.get("explanation"):
             lines += ["", fix["explanation"].strip()]
 
