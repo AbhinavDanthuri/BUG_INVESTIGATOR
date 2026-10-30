@@ -20,6 +20,13 @@ def _git(*args: str, cwd: Path | None = None, timeout: int = 600) -> str:
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        # Decode explicitly. Without this Python uses the machine's locale encoding - cp1252 on a
+        # default Windows install - and a commit message containing any byte it cannot map kills
+        # the reader thread, leaving stdout as None rather than raising. Git makes no promise that
+        # its output is valid UTF-8 either, so replace undecodable bytes instead of failing: a
+        # mangled character in one commit message must not cost the whole index.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     if proc.returncode != 0:

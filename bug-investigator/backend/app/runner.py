@@ -143,7 +143,9 @@ def run(db: Session, inv_id: int, llm: LLM, settings: Settings) -> m.Investigati
             )
         inv.index_version_id = version.id
 
-        retriever = HybridRetriever(db, version, api_key=settings.google_api_key)
+        retriever = HybridRetriever(
+            db, version, api_key=settings.google_api_key, exclude_issue=issue.number
+        )
         graph = build_graph(llm, retriever, settings.retrieval_top_k)
         state = graph.invoke(
             {

@@ -4,6 +4,9 @@ Three backends, chosen by the EMBEDDING_MODEL setting:
 
 - `gemini:<model>`  — Google's embedding API. No local model, no torch, no download. Needs the
   same free API key the LLM uses. Pick this when a machine cannot run torch.
+- `fastembed:<model>` — the same local models through ONNX Runtime instead of torch. Chosen
+  because torch would not load on the Windows machine this was developed on (Application Control
+  blocks the DLL), and an index built with `hashing` leaves BM25 doing all the work.
 - `hashing`         — deterministic bag-of-tokens, no dependencies at all. Used by the test suite
   and offline smoke runs. Retrieval quality is poor; not for real investigations.
 - anything else     — a sentence-transformers model name, run locally (best quality, needs torch).
@@ -20,6 +23,7 @@ import numpy as np
 
 HASHING_MODEL = "hashing"
 GEMINI_PREFIX = "gemini:"
+FASTEMBED_PREFIX = "fastembed:"
 _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+")
 log = logging.getLogger(__name__)
 
@@ -256,6 +260,28 @@ class SentenceTransformerEmbedder(Embedder):
         return np.asarray(vecs, dtype="float32")
 
 
+class FastEmbedEmbedder(Embedder):
+    """A local sentence-transformers model served by ONNX Runtime, so no torch is needed.
+
+    Same weights as the sentence-transformers backend; only the runtime differs. The first call
+    downloads the model (~130MB for bge-small) and caches it under the user's cache directory.
+    """
+
+    def __init__(self, model_name: str):
+        from fastembed import TextEmbedding
+
+        self.model_name = model_name
+        name = model_name[len(FASTEMBED_PREFIX):] if model_name.startswith(FASTEMBED_PREFIX) else model_name
+        self._model = TextEmbedding(name)
+        self.dim = len(next(iter(self._model.embed(["probe"]))))
+
+    def encode(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, self.dim), dtype="float32")
+        mat = np.asarray(list(self._model.embed(texts, batch_size=batch_size)), dtype="float32")
+        return _normalize(mat)  # fastembed normalizes already; cheap and makes it explicit
+
+
 @lru_cache(maxsize=2)
 def get_embedder(model_name: str, api_key: str = "") -> Embedder:
     """Cached: loading a local model, or probing the API for its dimension, is slow."""
@@ -263,4 +289,6 @@ def get_embedder(model_name: str, api_key: str = "") -> Embedder:
         return HashingEmbedder()
     if model_name.startswith(GEMINI_PREFIX):
         return GeminiEmbedder(model_name, api_key)
+    if model_name.startswith(FASTEMBED_PREFIX):
+        return FastEmbedEmbedder(model_name)
     return SentenceTransformerEmbedder(model_name)

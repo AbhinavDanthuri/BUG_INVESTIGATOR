@@ -473,3 +473,39 @@ def test_unknown_provider_fails_clearly():
 
     with pytest.raises(ValueError, match="unknown LLM_PROVIDER"):
         get_llm(Settings(llm_provider="nonesuch"))
+
+
+def test_fastembed_backend_is_selected_by_prefix(monkeypatch):
+    """torch would not load on the development machine (Application Control blocks the DLL), which
+    is why the index was built with `hashing` and BM25 ended up doing all the retrieval. ONNX
+    Runtime serves the same weights without torch."""
+    import sys
+    import types
+
+    import numpy as np
+
+    from app.retrieval.embedder import FASTEMBED_PREFIX, FastEmbedEmbedder, get_embedder
+
+    asked: list[str] = []
+
+    class FakeTextEmbedding:
+        def __init__(self, name):
+            asked.append(name)
+
+        def embed(self, texts, batch_size=32):
+            for i, _ in enumerate(texts):
+                yield np.array([float(i + 1), 0.0, 0.0], dtype="float32") * 5  # unnormalized
+
+    monkeypatch.setitem(sys.modules, "fastembed", types.SimpleNamespace(TextEmbedding=FakeTextEmbedding))
+    get_embedder.cache_clear()
+
+    emb = get_embedder(f"{FASTEMBED_PREFIX}BAAI/bge-small-en-v1.5")
+    assert isinstance(emb, FastEmbedEmbedder)
+    assert asked == ["BAAI/bge-small-en-v1.5"]  # the prefix is stripped before the model is loaded
+    assert emb.dim == 3
+
+    out = emb.encode(["a", "b"])
+    assert out.shape == (2, 3) and out.dtype == np.dtype("float32")
+    assert np.allclose(np.linalg.norm(out, axis=1), 1.0)  # normalized for the cosine index
+    assert emb.encode([]).shape == (0, 3)
+    get_embedder.cache_clear()

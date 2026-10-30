@@ -1,4 +1,5 @@
 """Ingestion: chunking rules, git walking, and index building against a real repo."""
+
 from app.db import models as m
 from app.ingest import repo_source
 from app.ingest.chunking import chunk_commit, chunk_issue, chunk_text_file, should_index, source_type_for
@@ -201,3 +202,39 @@ def test_limits_of_zero_skip_issues_and_commits(db, settings, sample_repo):
     assert m.SourceType.commit not in types
     assert m.SourceType.issue not in types
     assert types == {m.SourceType.code, m.SourceType.doc}
+
+
+def test_git_output_that_is_not_valid_utf8_does_not_sink_the_index(tmp_path, monkeypatch):
+    """Found indexing pallets/flask on Windows.
+
+    `git log` output is bytes and the code let Python choose how to decode it. On a default
+    Windows install that is cp1252: one unmappable byte killed subprocess's reader thread, so
+    stdout came back None and the whole index died with `'NoneType' object has no attribute
+    'split'` - a decoding problem wearing a confusing disguise. Where the locale is UTF-8 instead,
+    the same omission yields lone surrogates that raise later, at storage.
+
+    Git re-encodes commit messages it knows aren't UTF-8, so a real commit cannot reproduce this;
+    the bytes that reach us come from paths, refs and diffs. This swaps the program being run
+    rather than the call being made, so the decoding under test is the real one, with the real
+    keyword arguments.
+    """
+    import subprocess
+    import sys
+
+    from app.ingest import repo_source
+
+    emit = tmp_path / "emit.py"
+    emit.write_text(r"import sys; sys.stdout.buffer.write(b'fix: handle \x9d in input')" + "\n")
+
+    real_run = subprocess.run
+    monkeypatch.setattr(
+        repo_source.subprocess,
+        "run",
+        lambda cmd, **kw: real_run([sys.executable, str(emit)], **kw),
+    )
+
+    out = repo_source._git("log")
+    assert out.startswith("fix: handle ")
+    assert "\ufffd" in out
+    assert not any("\ud800" <= ch <= "\udfff" for ch in out), "lone surrogate: breaks on storage"
+    out.encode("utf-8")  # what the indexer does next; raises on a surrogate

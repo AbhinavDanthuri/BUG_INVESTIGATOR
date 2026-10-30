@@ -16,6 +16,7 @@ from app.retrieval.embedder import get_embedder
 from app.retrieval.faiss_store import load_index
 from app.retrieval.faiss_store import search as faiss_search
 from app.retrieval.fusion import rrf_fuse
+from app.retrieval.ranking import rerank
 
 _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+")
 
@@ -80,12 +81,26 @@ class HybridRetriever:
         version: m.IndexVersion,
         embedding_model: str | None = None,
         api_key: str = "",
+        exclude_issue: int | None = None,
     ):
         self._db = db
         self._vi = load_version_index(db, version)
         # Always the model the index was built with: querying with a different one is meaningless.
         self._embedder = get_embedder(embedding_model or version.embedding_model, api_key)
         self._evidence_ids: dict[int, str] = {}  # chunk_id -> "E3", stable within a run
+        # The index holds this repository's issue history, which includes the issue under
+        # investigation and anything that answered it. Retrieving those is not investigation, it is
+        # looking up the answer - and in the eval it is leakage, since every case is a closed issue
+        # sitting in its own index. A search on flask#6143 returned "issue #6143" as its top hit.
+        self._excluded_ref = f"#{exclude_issue}" if exclude_issue is not None else None
+        self._mentions = re.compile(rf"#{exclude_issue}\b") if exclude_issue is not None else None
+
+    def _is_about_the_issue_under_investigation(self, chunk) -> bool:
+        if self._excluded_ref is None:
+            return False
+        if chunk.source_type not in (m.SourceType.issue, m.SourceType.pr):
+            return False  # code and docs are the point; only the conversation is off limits
+        return chunk.source_ref == self._excluded_ref or bool(self._mentions.search(chunk.text))
 
     def _label(self, chunk_id: int) -> str:
         if chunk_id not in self._evidence_ids:
@@ -101,9 +116,14 @@ class HybridRetriever:
         wanted = set(source_types or [])
         def keep(cid: int) -> bool:
             chunk = self._vi.by_id.get(cid)
-            return chunk is not None and (not wanted or chunk.source_type.value in wanted)
+            if chunk is None or self._is_about_the_issue_under_investigation(chunk):
+                return False
+            return not wanted or chunk.source_type.value in wanted
 
         fused = rrf_fuse([[c for c in dense if keep(c)], [c for c in sparse if keep(c)]])
+        # Fusion ranks by resemblance alone, which lets packaging files and one chatty test file
+        # take most of the budget. Demote supporting files and cap per-file duplicates.
+        fused = rerank(fused, lambda cid: self._vi.by_id[cid].source_ref)
 
         results: list[Evidence] = []
         for chunk_id, score in fused[:k]:
@@ -198,7 +218,9 @@ class BM25OnlyRetriever(HybridRetriever):
         ids = [
             cid
             for cid in self._vi.bm25_rank(query, k * 4)
-            if (c := self._vi.by_id.get(cid)) and (not wanted or c.source_type.value in wanted)
+            if (c := self._vi.by_id.get(cid))
+            and not self._is_about_the_issue_under_investigation(c)
+            and (not wanted or c.source_type.value in wanted)
         ]
         out: list[Evidence] = []
         for rank, cid in enumerate(ids[:k], start=1):

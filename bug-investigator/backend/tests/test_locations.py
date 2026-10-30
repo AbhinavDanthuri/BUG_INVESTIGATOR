@@ -92,3 +92,30 @@ def test_mixed_formats_in_one_issue():
         Location("utils.py", 55),
         Location("exceptions.py", None),
     ]
+
+
+# ---------- phrasings found by reading real issues ----------
+def test_a_hedged_line_reference_is_still_a_location():
+    """flask#6172: "(app.py, around line 258)". The strict pattern saw nothing, so the lookup that
+    would have answered the issue never fired, and the investigator judged it on test files."""
+    locs = extract_locations("the tuple in `Flask.__init_subclass__` (app.py, around line 258) has 12 methods")
+    assert (locs[0].path, locs[0].line) == ("app.py", 258)
+
+
+def test_the_reference_said_backwards_also_counts():
+    locs = extract_locations("the bug is on line 42 of src/flask/app.py")
+    assert (locs[0].path, locs[0].line) == ("src/flask/app.py", 42)
+
+
+def test_a_backticked_path_after_the_line_number():
+    locs = extract_locations("line 99 in `src/x/y.py` is wrong")
+    assert (locs[0].path, locs[0].line) == ("src/x/y.py", 99)
+
+
+def test_a_path_and_a_line_in_different_sentences_are_not_joined():
+    """Loosening the pattern must not weld unrelated facts together."""
+    assert extract_locations("I read config.py yesterday. Separately, line 55 was slow.") == []
+
+
+def test_prose_between_a_path_and_a_line_breaks_the_link():
+    assert extract_locations("app.py is the entry point and does many things before line 258") == []

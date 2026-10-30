@@ -158,7 +158,7 @@ def run_baseline(db: Session, repo: m.Repository, issue: m.Issue, k: int = 10) -
     version = ready_version(db, repo.id)
     if version is None:
         raise RuntimeError("no ready index")
-    retriever = BM25OnlyRetriever(db, version)
+    retriever = BM25OnlyRetriever(db, version, exclude_issue=issue.number)
     files: list[str] = []
     for ev in retriever.search(f"{issue.title}\n{issue.body or ''}", ["code"], k=k):
         if ev.ref not in files:

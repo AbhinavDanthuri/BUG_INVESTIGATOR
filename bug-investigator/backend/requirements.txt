@@ -21,3 +21,4 @@ faiss-cpu>=1.8
 numpy>=1.26
 rank-bm25>=0.2.2
 sentence-transformers>=3.0
+fastembed>=0.4  # ONNX-backed local embeddings; no torch

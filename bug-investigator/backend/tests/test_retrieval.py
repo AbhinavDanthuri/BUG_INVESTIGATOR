@@ -156,3 +156,81 @@ def test_paths_match(indexed, wanted, expected):
 def test_fetch_file_handles_a_repo_prefixed_path(retriever):
     """The exact shape that silently returned nothing on a real issue."""
     assert [h.ref for h in retriever.fetch_file("sample/src/stats.py", line=3)] == ["src/stats.py"]
+
+
+# ---------- not retrieving the answer to the question being asked ----------
+def _issue_chunk(db, version, number, text, kind="issue"):
+    import hashlib
+
+    from app.db import models as m
+
+    c = m.Chunk(
+        repo_id=version.repo_id,
+        index_version_id=version.id,
+        source_type=m.SourceType.issue if kind == "issue" else m.SourceType.pr,
+        source_ref=f"#{number}",
+        text=text,
+        content_hash=hashlib.sha256(text.encode()).hexdigest(),
+    )
+    db.add(c)
+    db.commit()
+    return c
+
+
+def test_the_issue_under_investigation_is_not_retrieved(db, indexed_repo):
+    """A search for flask#6143 returned "issue #6143" as its top hit.
+
+    Every eval case is a closed issue, and the index holds the repository's issue history, so each
+    case sits in its own index. Reading back the issue you were handed is not investigation; in the
+    eval it is leakage.
+    """
+    from app.retrieval.hybrid import BM25OnlyRetriever, HybridRetriever, clear_index_cache
+
+    repo, version = indexed_repo
+    _issue_chunk(db, version, 6143, "add_url_rule leaves a route registered after an endpoint conflict")
+    clear_index_cache()
+
+    query = "add_url_rule leaves a route registered after an endpoint conflict"
+    for cls in (HybridRetriever, BM25OnlyRetriever):
+        plain = cls(db, version)
+        guarded = cls(db, version, exclude_issue=6143)
+        assert any(e.ref == "#6143" for e in plain.search(query, k=12)), f"{cls.__name__}: setup"
+        assert not any(e.ref == "#6143" for e in guarded.search(query, k=12))
+    clear_index_cache()
+
+
+def test_a_pull_request_that_answers_the_issue_is_excluded_too(db, indexed_repo):
+    """pr #6144 came back alongside issue #6143. "Fixes #6143" hands over the verdict."""
+    from app.retrieval.hybrid import HybridRetriever, clear_index_cache
+
+    repo, version = indexed_repo
+    _issue_chunk(db, version, 6144, "Fixes #6143 by removing the rule when the endpoint clashes", kind="pr")
+    clear_index_cache()
+
+    guarded = HybridRetriever(db, version, exclude_issue=6143)
+    assert not any(e.ref == "#6144" for e in guarded.search("endpoint clashes rule removed", k=12))
+    clear_index_cache()
+
+
+def test_a_coincidental_number_is_not_mistaken_for_a_reference(db, indexed_repo):
+    """#61431 is not #6143."""
+    from app.retrieval.hybrid import HybridRetriever, clear_index_cache
+
+    repo, version = indexed_repo
+    _issue_chunk(db, version, 7000, "see #61431 for the endpoint clash discussion")
+    clear_index_cache()
+
+    guarded = HybridRetriever(db, version, exclude_issue=6143)
+    assert any(e.ref == "#7000" for e in guarded.search("endpoint clash discussion", k=12))
+    clear_index_cache()
+
+
+def test_code_is_never_excluded_however_the_numbers_fall(db, indexed_repo):
+    """Only the conversation is off limits. Code mentioning the issue number stays."""
+    from app.retrieval.hybrid import HybridRetriever, clear_index_cache
+
+    repo, version = indexed_repo
+    clear_index_cache()
+    guarded = HybridRetriever(db, version, exclude_issue=6143)
+    assert any(e.source_type == "code" for e in guarded.search("average empty list", k=12))
+    clear_index_cache()

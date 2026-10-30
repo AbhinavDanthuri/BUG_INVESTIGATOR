@@ -22,7 +22,18 @@ _PATH_HASH_LINE = re.compile(r"\b([\w./\-]+\.[A-Za-z]{1,6})#L(\d+)\b")
 # path:line  e.g. src/click/core.py:1391  or  core.py:1391:5
 _PATH_COLON_LINE = re.compile(r"\b([\w./\-]+\.[A-Za-z]{1,6}):(\d+)(?::\d+)?\b")
 # path "line" N  e.g. core.py line 1391 / core.py, line 1391 / core.py (line 1391)
-_PATH_WORD_LINE = re.compile(r"\b([\w./\-]+\.[A-Za-z]{1,6})\b[\s,(]*\bline\s+(\d+)\b", re.IGNORECASE)
+# The hedge words matter: flask#6172 wrote "(app.py, around line 258)" and an earlier version of
+# this pattern, which allowed only punctuation between the two, extracted nothing from it. The one
+# lookup that would have answered that issue never fired. Two filler words at most, so a path in
+# one sentence is not welded to a line number in the next.
+_HEDGE = r"(?:(?:around|about|approx(?:imately)?|roughly|near|at|on|in|from|~)\s+){0,2}"
+_PATH_WORD_LINE = re.compile(
+    rf"\b([\w./\-]+\.[A-Za-z]{{1,6}})\b[\s,(]*{_HEDGE}\blines?\s*#?\s*(\d+)\b", re.IGNORECASE
+)
+# the same thing said backwards: "line 258 of app.py", "on line 42 in src/x.py"
+_LINE_WORD_PATH = re.compile(
+    r"\blines?\s*#?\s*(\d+)\s+(?:of|in|within)\s+`?([\w./\-]+\.[A-Za-z]{1,6})`?", re.IGNORECASE
+)
 # a bare filename, usually in backticks
 _BARE_PATH = re.compile(r"`([\w./\-]+\.[A-Za-z]{1,6})`")
 
@@ -65,6 +76,10 @@ def extract_locations(text: str, limit: int = 6) -> list[Location]:
         for path, line in pattern.findall(remainder):
             if _is_source(path):
                 with_lines.append(Location(path.lstrip("./"), int(line)))
+
+    for line, path in _LINE_WORD_PATH.findall(remainder):  # this one yields (line, path)
+        if _is_source(path):
+            with_lines.append(Location(path.lstrip("./"), int(line)))
 
     bare = [
         Location(path.lstrip("./"))
